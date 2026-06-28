@@ -1,77 +1,97 @@
 # pr-review-prep
 
-An [OpenClaw](https://github.com/openclaw/openclaw) skill that turns a GitHub
-pull-request URL into a structured review checklist, with risk flags derived
-from file-path heuristics rather than model guesswork.
+OpenClaw skill for turning a GitHub pull request into a structured reviewer checklist.
 
-This is the companion skill to the DEV.to post
-[_Why This Backend Engineer Stopped Calling LLM APIs From Every Service And Started Running a Local Agent Instead_](https://dev.to/).
+The useful part is deliberately deterministic: a shell script scans the changed file list and emits risk flags before any model writes prose. That keeps the review policy auditable in git instead of hiding it inside a prompt.
 
-## Why this exists
+## Why This Exists
 
-Pull-request review is the place where your organisation's risk tolerance shows
-up in practice. Most "AI PR reviewer" tools fail the same way: they make the LLM
-decide _what is risky_, which is the one thing the LLM is actually bad at, because
-your risk model is not in the training data.
+Most automated PR-review tools mix two different jobs:
 
-This skill inverts that:
+- deciding what is risky
+- explaining what the reviewer should check
 
-- **Deterministic heuristics** (a small bash script, ~60 lines) decide which
-  files are risky. Every rule is one line of `grep -E` you can read in git.
-- **The LLM** composes the human-readable checklist and open questions _from
-  those flags_, where language-model judgement actually helps.
+This repo keeps those jobs separate.
 
-The split means you can audit the risk logic in a PR, and the skill's behaviour
-is predictable enough to trust in a team setting.
+- `scripts/risk-scan.sh` owns risk detection through readable path and size heuristics.
+- `SKILL.md` defines how OpenClaw should turn those flags into a concise review checklist.
+
+That split makes the behavior predictable enough for team use. If a rule is wrong, edit the script and review the change like normal code.
+
+## Current Risk Flags
+
+| Flag | Trigger |
+| --- | --- |
+| `config-change` | Spring-style app config or `.env` files |
+| `db-migration` | SQL files, migration directories, or Java migration classes |
+| `security-sensitive` | `security`, `auth`, `authn`, or `authz` paths |
+| `infra-change` | Docker, Terraform, Helm, Kubernetes, or k8s paths |
+| `dependency-update` | Lockfiles and dependency manifests |
+| `breaking-change` | Optional PR body scan for breaking-change language |
+| `large-diff` | Optional stats scan for >20 files or >500 changed lines |
 
 ## Install
 
 ```bash
-# 1. Clone next to your other OpenClaw skills
-git clone https://github.com/<you>/pr-review-prep.git \
+git clone https://github.com/singhvishalkr/pr-review-prep.git \
   ~/.openclaw/skills/pr-review-prep
 
-# 2. Ensure prerequisites
-gh auth status              # must be authenticated
-which bash && which grep    # standard POSIX tools
-
-# 3. Reload skills in the OpenClaw dashboard or run:
+gh auth status
 openclaw skill reload pr-review-prep
 ```
 
-The skill advertises its dependencies in `SKILL.md` under `metadata.openclaw.requires`,
-so OpenClaw will offer to install `gh` via Homebrew or apt on first use.
+Required tools:
+
+- `gh`
+- `bash`
+- `grep`
 
 ## Use
 
-In any channel wired to OpenClaw (CLI, Slack, iMessage):
-
 ```text
-> review prep for https://github.com/openclaw/openclaw/pull/123
+review prep for https://github.com/owner/repo/pull/123
 ```
 
-The agent pulls the diff with `gh`, runs `scripts/risk-scan.sh` against the file
-list, and returns a markdown checklist with:
+The skill reads PR metadata with `gh`, scans changed files with `scripts/risk-scan.sh`, and returns:
 
-- PR header (title, author, branches, +/− line counts)
-- Risk flags from the heuristic
-- Reviewer checklist (one item per flag + test coverage + rollback)
-- Open questions derived from the PR body
+- PR title, author, branches, line counts, and changed-file count.
+- Deterministic risk flags.
+- Reviewer checklist.
+- Open questions for the author.
 
-See [`SKILL.md`](SKILL.md) for the full output contract and an example.
+## Run The Scanner Directly
+
+```bash
+gh pr diff https://github.com/owner/repo/pull/123 --name-only > /tmp/pr-files.txt
+bash scripts/risk-scan.sh /tmp/pr-files.txt
+```
+
+With PR body and size inputs:
+
+```bash
+bash scripts/risk-scan.sh /tmp/pr-files.txt \
+  --body /tmp/pr-body.txt \
+  --stats 384 27 14
+```
+
+## Test
+
+```bash
+bash test/run.sh
+```
+
+The fixture tests cover risky file paths, clean PRs, breaking-change body text, and large-diff thresholds.
 
 ## Extend
 
-Teams should fork and add their own heuristics. Good candidates:
+Teams should fork the repo and add their own rules. Good candidates:
 
-- Flag changes to cron schedules or retry configuration.
-- Flag PRs that touch a "golden file" that only two engineers own.
-- Flag PRs that modify the PR-template itself (so the person reviewing the
-  template is aware it will propagate).
+- Flag changes to retry configuration or cron schedules.
+- Flag files owned by a narrow group of maintainers.
+- Flag generated files that should only change through a specific build step.
+- Flag API-contract files that require backward-compatibility checks.
 
-All of these are one-line additions to `scripts/risk-scan.sh`. Open a PR and the
-rules become part of your team's reviewable policy, not a prompt hiding inside
-an agent config.
+Each new rule should be a small addition to `scripts/risk-scan.sh` plus a fixture in `test/`.
 
 ## License
 
